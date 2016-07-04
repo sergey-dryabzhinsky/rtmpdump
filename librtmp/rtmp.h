@@ -184,6 +184,8 @@ extern "C"
     unsigned short socksport;
     unsigned short port;
 
+    int redirected;
+
 #ifdef CRYPTO
 #define RTMP_SWF_HASHLEN	32
     void *dh;			/* for encryption */

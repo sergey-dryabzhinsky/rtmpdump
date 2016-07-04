@@ -3047,6 +3047,7 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
     }
   else if (AVMATCH(&method, &av__error))
     {
+        int handled = FALSE;
 #ifdef CRYPTO
       AVal methodInvoked = {0};
       int i;
@@ -3088,6 +3089,7 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
                 if (!RTMP_Connect(r, NULL) || !RTMP_ConnectStream(r, 0))
                   goto leave;
               }
+                handled = TRUE;
             }
         }
       else
@@ -3095,14 +3097,68 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
           RTMP_Log(RTMP_LOGERROR, "rtmp server sent error");
         }
       free(methodInvoked.av_val);
-#else
-      RTMP_Log(RTMP_LOGERROR, "rtmp server sent error");
 #endif
+
+        double code = 0;
+        unsigned int parsedPort;
+        AMFObject obj2;
+        AMFObjectProperty p;
+        AVal redirect;
+        SAVC(ex);
+        SAVC(redirect);
+
+        AMFProp_GetObject(AMF_GetProp(&obj, NULL, 3), &obj2);
+        if (RTMP_FindFirstMatchingProperty(&obj2, &av_ex, &p)) {
+            AMFProp_GetObject(&p, &obj2);
+            if (RTMP_FindFirstMatchingProperty(&obj2, &av_code, &p))
+                code = AMFProp_GetNumber(&p);
+            if ((int)code == 302 && RTMP_FindFirstMatchingProperty(&obj2, &av_redirect, &p)) {
+                AMFProp_GetString(&p, &redirect);
+                r->Link.redirected = TRUE;
+
+//                char *playpath = "//playpath";
+                int len = redirect.av_len/* + strlen(playpath)*/;
+                char *url = malloc(len + 1);
+                memcpy(url, redirect.av_val, redirect.av_len);
+//                memcpy(url + redirect.av_len, playpath, strlen(playpath));
+                url[len] = '\0';
+                r->Link.tcUrl.av_val = url;
+                r->Link.tcUrl.av_len = redirect.av_len;
+                RTMP_ParseURL(url, &r->Link.protocol, &r->Link.hostname, &parsedPort, &r->Link.playpath0, &r->Link.app);
+                if (parsedPort)
+                    r->Link.port = parsedPort;
+           }
+        }
+        if (r->Link.redirected) {
+            handled = TRUE;
+            RTMP_Log(RTMP_LOGINFO, "rtmp server sent redirect");
+        }
+
+        if (!handled)
+            RTMP_Log(RTMP_LOGERROR, "rtmp server sent error");
     }
   else if (AVMATCH(&method, &av_close))
     {
-      RTMP_Log(RTMP_LOGERROR, "rtmp server requested close");
-      RTMP_Close(r);
+        if (r->Link.redirected) {
+            r->Link.redirected = FALSE;
+
+            int publish = r->Link.protocol & RTMP_FEATURE_WRITE;
+
+            RTMP_Close(r);
+            RTMP_Log(RTMP_LOGINFO, "trying to connect with redirected url");
+
+            r->Link.protocol |= RTMP_FEATURE_WRITE;
+            RTMP_Connect(r, NULL);
+
+            if (publish) {
+                RTMP_Log(RTMP_LOGINFO, "trying to restart publishing");
+                SendReleaseStream(r);
+                SendFCPublish(r);
+            }
+        } else {
+            RTMP_Log(RTMP_LOGERROR, "rtmp server requested close");
+            RTMP_Close(r);
+        }
     }
   else if (AVMATCH(&method, &av_onStatus))
     {
@@ -3174,6 +3230,52 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
 	    r->m_pausing = 3;
 	  }
 	}
+
+    // By FMS documentation for stream redirect server sends reject + ex.code = 302 via onStatus
+        else if (AVMATCH(&code, &av_NetConnection_Connect_Rejected)) {
+
+            RTMP_Log(RTMP_LOGDEBUG, "%s, got into <onStatus> + code=Rejected", __FUNCTION__);
+
+            int handled = FALSE;
+            double code = 0;
+            unsigned int parsedPort;
+            AMFObject obj2;
+            AMFObjectProperty p;
+            AVal redirect;
+            SAVC(ex);
+            SAVC(redirect);
+
+            AMFProp_GetObject(AMF_GetProp(&obj, NULL, 3), &obj2);
+            if (RTMP_FindFirstMatchingProperty(&obj2, &av_ex, &p)) {
+                AMFProp_GetObject(&p, &obj2);
+                if (RTMP_FindFirstMatchingProperty(&obj2, &av_code, &p))
+                    code = AMFProp_GetNumber(&p);
+                if ((int)code == 302 && RTMP_FindFirstMatchingProperty(&obj2, &av_redirect, &p)) {
+                    AMFProp_GetString(&p, &redirect);
+                    r->Link.redirected = TRUE;
+
+//                char *playpath = "//playpath";
+                    int len = redirect.av_len/* + strlen(playpath)*/;
+                    char *url = malloc(len + 1);
+                    memcpy(url, redirect.av_val, redirect.av_len);
+//                memcpy(url + redirect.av_len, playpath, strlen(playpath));
+                    url[len] = '\0';
+                    r->Link.tcUrl.av_val = url;
+                    r->Link.tcUrl.av_len = redirect.av_len;
+                    RTMP_ParseURL(url, &r->Link.protocol, &r->Link.hostname, &parsedPort, &r->Link.playpath0, &r->Link.app);
+                    if (parsedPort)
+                        r->Link.port = parsedPort;
+                }
+            }
+            if (r->Link.redirected) {
+                handled = TRUE;
+                RTMP_Log(RTMP_LOGINFO, "rtmp server sent redirect");
+            }
+
+            if (!handled)
+                RTMP_Log(RTMP_LOGERROR, "rtmp server sent error");
+        }
+
     }
   else if (AVMATCH(&method, &av_playlist_ready))
     {
